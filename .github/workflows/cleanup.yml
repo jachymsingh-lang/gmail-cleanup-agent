@@ -2,10 +2,8 @@ name: Gmail Cleanup Agent
 
 on:
   schedule:
-    # 22:00 v ČR odpovídá 20:00 UTC (v zimním čase) nebo 21:00 UTC (v letním čase)
-    # Cron '0 20 * * *' spustí skript každý den ve 22:00 SEČ
-    - cron: '0 20 * * *'
-  workflow_dispatch: # Ponecháme i možnost spustit ručně v GitHubu
+    - cron: '0 20 * * *' # Spustí se každý den ve 22:00 SEČ
+  workflow_dispatch: # Umožňuje ruční spuštění kdykoliv jedním kliknutím
 
 jobs:
   cleanup:
