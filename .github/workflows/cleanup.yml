@@ -2,14 +2,14 @@ name: Gmail Cleanup Agent
 
 on:
   schedule:
-    - cron: '0 6 * * 1' # Spustí se každé pondělí v 6:00 (pro kontrolu 14denního intervalu)
+    - cron: '0 6 * * 1' # Spustí se každé pondělí v 6:00
   workflow_dispatch: # Umožňuje ruční spuštění kdykoliv jedním kliknutím
 
 jobs:
   cleanup:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # Povolení pro uložení data posledního hlášení zpět do repozitáře
+      contents: write # Povolení pro uložení souborů s datem a statistikami zpět do repozitáře
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -27,8 +27,8 @@ jobs:
         run: |
           python cleanup_agent.py
 
-      - name: Commit last report date if updated
+      - name: Commit stats and report date update
         uses: stefanzweifel/git-auto-commit-action@v4
         with:
-          commit_message: "Auto: Update last report date"
-          file_pattern: last_report.txt
+          commit_message: "Auto: Update agent stats and report schedule"
+          file_pattern: "last_report.txt stats.json"
