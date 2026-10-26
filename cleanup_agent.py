@@ -38,7 +38,7 @@ def send_status_email(stats):
     url = "https://api.resend.com/emails"
     html_content = f"""
     <p>Ahoj Jáchyme,</p>
-    <p>tady je tvůj 14denní přehled od Gmail Cleanup Agenta. Všechno funguje a schránka je pod kontrolou!</p>
+    <p>tady je tvůj 14denní přehled od Gmail Cleanup Agenta. Schránka je pod kontrolou!</p>
     <ul>
         <li><b>Zkontrolováno zpráv:</b> {stats['checked']}</li>
         <li><b>Uklizeno spamů/balastu:</b> {stats['spam']}</li>
@@ -46,7 +46,7 @@ def send_status_email(stats):
         <li><b>Expirováno starých notifikací:</b> {stats['expired']}</li>
         <li><b>Detekováno bezpečnostních alertů:</b> {stats['security']}</li>
     </ul>
-    <p>Pokračuji v hlídání na pozadí. S pozdravem,<br>Tvůj Gmail Agent</p>
+    <p>Pokračuji v hlídání na pozadí.<br>Tvůj Gmail Agent</p>
     """
 
     payload = {
@@ -83,8 +83,6 @@ def check_and_send_periodic_report():
     if not last_date or (now - last_date) >= timedelta(days=14):
         stats = load_stats()
         send_status_email(stats)
-        
-        # Reset statistik a uložení nového data hlášení
         save_stats(reset_stats())
         with open(REPORT_FILE, "w") as f:
             f.write(now.strftime("%Y-%m-%d"))
@@ -103,13 +101,17 @@ def clean_gmail():
         return
 
     mail_ids = messages[0].split()
-    print(f"Nalezeno {len(mail_ids)} nepřečtených zpráv k analýze.")
+    print(f"Nalezeno celkem {len(mail_ids)} nepřečtených zpráv.")
+
+    # Zpracujeme v jedné dávce maximálně 300 zpráv pro rychlý a bezpečný průběh
+    batch_ids = mail_ids[:300]
+    print(f"Zpracovávám tuto dávku: {len(batch_ids)} zpráv.")
 
     stats = load_stats()
     spam_keywords = ["unsubscribe", "odhlásit", "slevová akce", "vyhra", "kredit zdarma", "casino", "poptávka zdarma", "newsletter"]
     security_keywords = ["security alert", "podezřelé", "změna hesla", "verification code", "overeni", "login", "two-factor"]
 
-    for mail_id in mail_ids:
+    for mail_id in batch_ids:
         try:
             stats["checked"] += 1
             res, msg_data = mail.fetch(mail_id, '(RFC822)')
@@ -133,57 +135,72 @@ def clean_gmail():
                         body = msg.get_payload(decode=True).decode("utf-8", errors="ignore")
 
                     body_lower = (subject + " " + body).lower()
+                    sender_lower = sender.lower()
                     
-                    # 1. Bezpečnostní hlídač (Security Watchdog)
+                    # 1. Bezpečnostní hlídač
                     if any(kw in body_lower for kw in security_keywords):
-                        print(f"⚠️ Detekován bezpečnostní alert: '{subject}'")
-                        mail.store(mail_id, '+FLAGS', '\\Flagged') # Přidá hvězdičku
+                        print(f"⚠️ Bezpečnostní alert: '{subject}'")
+                        mail.store(mail_id, '+FLAGS', '\\Flagged')
                         stats["security"] += 1
                         continue
 
-                    # 2. Detekce spamu a balastu
+                    # 2. Spam / Balast -> do koše
                     is_trash = any(keyword in body_lower for keyword in spam_keywords)
                     if is_trash:
-                        print(f"Detekován balast / spam: '{subject}'")
+                        print(f"🗑️ Balast: '{subject}'")
                         mail.store(mail_id, '+X-GM-LABELS', '\\Trash')
                         stats["spam"] += 1
                     else:
-                        # 3. Automatické štítkování
-                        sender_lower = sender.lower()
+                        # 3. Inteligentní štítkování podle tvých přesných názvů
+                        labeled = False
+                        
                         if "github" in sender_lower or "github" in subject.lower():
-                            mail.store(mail_id, '+X-GM-LABELS', 'GitHub')
+                            mail.store(mail_id, '+X-GM-LABELS', '"gitHub"')
+                            labeled = True
+                            print(f"🏷️ Oštítkováno: gitHub")
+                        elif "job agent" in subject.lower() or "pracovní" in body_lower or "jobs.cz" in body_lower:
+                            mail.store(mail_id, '+X-GM-LABELS', '"JobAgent"')
+                            labeled = True
+                            print(f"🏷️ Oštítkováno: JobAgent")
+                        elif "nhl" in body_lower or "hokej" in body_lower or "montreal" in body_lower or "calgary" in body_lower or "boston" in body_lower:
+                            mail.store(mail_id, '+X-GM-LABELS', '"NHL agent"')
+                            labeled = True
+                            print(f"🏷️ Oštítkováno: NHL agent")
+                        elif "sport" in subject.lower() or "premier league" in body_lower or "champions league" in body_lower:
+                            mail.store(mail_id, '+X-GM-LABELS', '"Sport"')
+                            labeled = True
+                            print(f"🏷️ Oštítkováno: Sport")
+                        elif "odpověď" in body_lower or "reakce na inzerát" in body_lower or "výběrové řízení" in body_lower:
+                            mail.store(mail_id, '+X-GM-LABELS', '"OdpovedNaInzeraty"')
+                            labeled = True
+                            print(f"🏷️ Oštítkováno: OdpovedNaInzeraty")
+                        elif "byt" in body_lower or "realit" in body_lower or "sreality" in sender_lower or "pronájem" in body_lower:
+                            mail.store(mail_id, '+X-GM-LABELS', '"bydleni"')
+                            labeled = True
+                            print(f"🏷️ Oštítkováno: bydleni")
+                        elif "platba" in body_lower or "faktura" in body_lower or "banka" in sender_lower or "transakce" in body_lower:
+                            mail.store(mail_id, '+X-GM-LABELS', '"financee"')
+                            labeled = True
+                            print(f"🏷️ Oštítkováno: financee")
+                        elif "n8n" in sender_lower or "resend" in sender_lower or "github actions" in body_lower or "webhook" in body_lower:
+                            mail.store(mail_id, '+X-GM-LABELS', '"Automatizace"')
+                            labeled = True
+                            print(f"🏷️ Oštítkováno: Automatizace")
+                        elif "rodina" in sender_lower or "ahoj" in body_lower:
+                            mail.store(mail_id, '+X-GM-LABELS', '"osobni"')
+                            labeled = True
+                            print(f"🏷️ Oštítkováno: osobni")
+
+                        if labeled:
                             stats["labeled"] += 1
-                            print(f"-> Oštítkováno jako GitHub")
-                        elif "job agent" in subject.lower():
-                            mail.store(mail_id, '+X-GM-LABELS', 'Job Agent')
-                            stats["labeled"] += 1
-                            print(f"-> Oštítkováno jako Job Agent")
-                        elif "sport" in subject.lower() or "resend" in sender_lower:
-                            mail.store(mail_id, '+X-GM-LABELS', 'Sport')
-                            stats["labeled"] += 1
-                            print(f"-> Oštítkováno jako Sport")
 
         except Exception as e:
             print(f"Chyba při zpracování zprávy ID {mail_id}: {e}")
 
-    # 4. Auto-Expire: Archivace starých notifikací (starších než 14 dnů)
-    try:
-        date_limit = (datetime.now() - timedelta(days=14)).strftime("%d-%b-%Y")
-        # Hledáme staré zprávy s příznakem GitHub/Notifikace
-        status_old, old_msgs = mail.search(None, f'(BEFORE {date_limit})')
-        if status_old == 'OK' and old_msgs[0]:
-            old_ids = old_msgs[0].split()
-            for old_id in old_ids[:20]: # Omezení na dávku 20 zpráv pro plynulost
-                mail.store(old_id, '+X-GM-LABELS', '\\Archived') # Odebere z doručené pošty
-                stats["expired"] += len(old_ids)
-    except Exception as e:
-        print(f"Chyba při auto-expire starých zpráv: {e}")
-
     save_stats(stats)
     mail.logout()
-    print("Úklid Gmailu a aktualizace statistik dokončena.")
+    print("Dávkový úklid a štítkování dokončeno.")
     
-    # Kontrola a případné odeslání 14denního hlášení
     check_and_send_periodic_report()
 
 if __name__ == "__main__":
