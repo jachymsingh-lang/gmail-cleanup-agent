@@ -40,14 +40,15 @@ NOISE_SENDERS = [
  
 # (část adresy odesílatele, štítek, archivovat z doručené?)
 SENDER_RULES = [
-    ("github.com", "gitHub", False),
-    ("notifications@github", "gitHub", False),
     ("resend", "Automatizace", True),
     ("n8n", "Automatizace", True),
     ("sreality", "bydleni", False),
     ("bezrealitky", "bydleni", False),
     ("jobs.cz", "JobAgent", False),
 ]
+ 
+# Klíčová slova v předmětu/obsahu GitHubu, která CHCEŠ nechat v doručené (kódy, PR, akce k řešení)
+GITHUB_KEEP_RE = re.compile(r"pull request|review|approval|issue|security|action required|\bcode\b", re.IGNORECASE)
  
 # Záložní pravidla podle předmětu (jen štítek, nikdy nearchivují).
 KEYWORD_RULES = [
@@ -187,6 +188,17 @@ def classify(msg):
         return {"kind": "noise", "label": NOISE_LABEL, "archive": True,
                 "read": True, "subject": subject}
  
+    # Speciální pravidlo pro GitHub: běžné notifikace se archivují, důležité s kódem/PR zůstanu v doručené
+    if "github.com" in addr or "notifications@github" in addr:
+        is_important_code = bool(GITHUB_KEEP_RE.search(subj))
+        return {
+            "kind": "labeled", 
+            "label": "GitHub", 
+            "archive": not is_important_code, # Pokud je to kód/PR, nearchivuje se (zůstane v Inboxu)
+            "read": not is_important_code,
+            "subject": subject
+        }
+ 
     for part, label, archive in SENDER_RULES:
         if part in addr:
             return {"kind": "labeled", "label": label, "archive": archive,
@@ -308,7 +320,7 @@ def clean_gmail():
                         msg = fetch_headers(mail, uid)
                         if msg is not None:
                             print(f"   🗑️ by šlo do koše: '{decode_subject(msg)}'")
-                    trash(mail, uid)
+                    trace_trash = trash(mail, uid)
                     stats["deleted"] = stats.get("deleted", 0) + 1
                 except Exception as e:
                     print(f"Chyba při mazání UID {uid}: {e}")
@@ -320,5 +332,5 @@ def clean_gmail():
     print("Hotovo.")
     check_and_send_periodic_report()
  
-if __name__ == "__main__":
+if __name__> "__main__":
     clean_gmail()
