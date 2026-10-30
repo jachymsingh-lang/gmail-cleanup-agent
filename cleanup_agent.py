@@ -25,7 +25,7 @@ DRY_RUN = os.environ.get("DRY_RUN", "1") == "1"
 SCAN_DAYS = 14                 # kolik dní zpět se prochází doručená
 ARCHIVE_READ_AFTER_DAYS = 7    # přečtené maily starší než X dní se archivují
 MAX_BATCH = 300                # max. počet zpráv na jedno třídění / jedno mazací pravidlo
-MAX_ARCHIVE = 1000             # max. počet starých přečtených mailů archivovaných za noc
+MAX_ARCHIVE = 300              # max. počet starých přečtených mailů archivovaných za noc
 
 # Odesílatelé (část adresy), které se NIKDY nesmí automaticky měnit.
 WHITELIST = [
@@ -43,18 +43,32 @@ NOISE_SENDERS = [
 SENDER_RULES = [
     ("resend", "Automatizace", True),
     ("n8n", "Automatizace", True),
-    ("sreality", "bydleni", False),
-    ("bezrealitky", "bydleni", False),
+    ("sreality", "Bydleni", False),
+    ("bezrealitky", "Bydleni", False),
     ("jobs.cz", "JobAgent", False),
 ]
 
-# Maily od tvých agentů, které chceš číst: zůstanou v doručené a nepřečtené.
-# (slovo v předmětu, štítek)
-KEEP_IN_INBOX_SUBJECT = [
-    ("briefing", "Automatizace"),
-    ("job agent", "JobAgent"),
-    ("realitní makléř", "bydleni"),
+# Reporty od tvých agentů: (slovo v předmětu, štítek, archivovat z doručené?)
+# True = přeskočí doručenou a označí se jako přečtené, False = zůstane v doručené nepřečtené
+AGENT_RULES = [
+    ("briefing", "Automatizace", False),
+    ("job agent", "JobAgent", False),
+    ("realitní makléř", "Bydleni", False),
+    ("nhl report", "NHL agent", True),
+    ("nhl ranní report", "NHL agent", True),
+    ("dnešní zápasy", "Sport", True),
+    ("sport dnes", "Sport", True),
+    ("za hodinu:", "Sport", True),
 ]
+
+# Odpovědi na tvoje reakce na inzeráty: štítek OdpovedNaInzeraty, přeskočí doručenou (zůstanou nepřečtené)
+APPLICATION_RE = re.compile(
+    r"zařadili jsme vás|výběrov\w* řízení|hlásíte se do|potvrzení přijetí odpovědi|"
+    r"reakce na inzerát|odpověď na (inzerát|pozici)|"
+    r"děkujeme za (váš|vaši|vaše) (životopis|odpověď|reakci|zájem)",
+    re.IGNORECASE,
+)
+APPLICATION_LABEL = "OdpovedNaInzeraty"
 
 # Klíčová slova v předmětu GitHubu, která CHCEŠ nechat v doručené (kódy, PR, akce k řešení, selhané běhy)
 GITHUB_KEEP_RE = re.compile(
@@ -74,8 +88,8 @@ KEYWORD_RULES = [
     (re.compile(r"\b(nhl|hokej)\b"), "NHL agent"),
     (re.compile(r"premier league|champions league|\bsport"), "Sport"),
     (re.compile(r"výběrové řízení|reakce na inzerát|odpověď na"), "OdpovedNaInzeraty"),
-    (re.compile(r"\bbyt\b|\bbyty\b|realit|pronájem"), "bydleni"),
-    (re.compile(r"platb|faktur|transakc"), "financee"),
+    (re.compile(r"\bbyt\b|\bbyty\b|realit|pronájem"), "Bydleni"),
+    (re.compile(r"platb|faktur|transakc"), "Financee"),
     (re.compile(r"job agent|brigád"), "JobAgent"),
 ]
 
@@ -246,11 +260,16 @@ def classify(msg):
             "subject": subject,
         }
 
-    # Reporty od tvých agentů (briefing, Job Agent, byty) zůstávají v doručené
-    for word, label in KEEP_IN_INBOX_SUBJECT:
+    # Odpovědi na tvoje reakce na inzeráty: rovnou do štítku, bez doručené
+    if APPLICATION_RE.search(subj):
+        return {"kind": "labeled", "label": APPLICATION_LABEL, "archive": True,
+                "read": False, "subject": subject}
+
+    # Reporty od tvých agentů: každý do svého štítku
+    for word, label, archive in AGENT_RULES:
         if word in subj:
-            return {"kind": "labeled", "label": label, "archive": False,
-                    "read": False, "subject": subject}
+            return {"kind": "labeled", "label": label, "archive": archive,
+                    "read": archive, "subject": subject}
 
     for part, label, archive in SENDER_RULES:
         if part in addr:
@@ -287,6 +306,35 @@ def batch_store(mail, uids, command, value, size=100):
             failed += len(part)
     return failed
 
+def still_in_selected(mail, uids):
+    """Vrátí UID, které jsou pořád ve vybrané složce (ověření, že změna opravdu zabrala)."""
+    remaining = []
+    for part in chunks(uids, 100):
+        res, data = mail.uid("search", None, "UID", b",".join(part).decode())
+        if res == "OK" and data and data[0]:
+            remaining.extend(data[0].split())
+    return remaining
+
+def archive_uids(mail, uids):
+    """Odebere zprávy z doručené (musí být vybraná složka INBOX).
+    Vrací počet zpráv, které se archivovat nepodařilo."""
+    if not uids:
+        return 0
+    batch_store(mail, uids, "-X-GM-LABELS", "(\\Inbox)")
+    mail.noop()
+    left = still_in_selected(mail, uids)
+    if left:
+        print(f"   ℹ️ Odebrání štítku Inbox nezabralo u {len(left)} zpráv, zkouším záložní způsob.")
+        batch_store(mail, left, "+FLAGS", "(\\Deleted)")
+        for part in chunks(left, 100):
+            try:
+                mail.uid("expunge", b",".join(part).decode())
+            except Exception as e:
+                print(f"Chyba při odstranění z doručené: {e}")
+        mail.noop()
+        left = still_in_selected(mail, uids)
+    return len(left)
+
 def apply_groups(mail, groups):
     """groups: {(štítek, archiv, přečteno, hvězdička): [uid, ...]}"""
     if DRY_RUN:
@@ -295,23 +343,49 @@ def apply_groups(mail, groups):
     for (label, archive, read, flag), uids in groups.items():
         if label:
             failed += batch_store(mail, uids, "+X-GM-LABELS", f'("{label}")')
-        if archive:
-            failed += batch_store(mail, uids, "-X-GM-LABELS", "(\\Inbox)")
         if read:
             failed += batch_store(mail, uids, "+FLAGS", "(\\Seen)")
         if flag:
             failed += batch_store(mail, uids, "+FLAGS", "(\\Flagged)")
+        if archive:
+            # archivace až nakonec, jinak by se příznaky u zpráv mimo doručenou už neuložily
+            failed += archive_uids(mail, uids)
     return failed
 
-def find_all_mail(mail):
+def find_folder(mail, special_use):
     res, folders = mail.list()
     if res != "OK":
         return None
     for raw in folders:
         line = raw.decode("utf-8", errors="ignore")
-        if "\\All" in line:
+        if special_use in line:
             return line.split(' "/" ')[-1].strip().strip('"')
     return None
+
+def find_all_mail(mail):
+    return find_folder(mail, "\\All")
+
+def search_raw(mail, query):
+    res, data = mail.uid("search", None, "X-GM-RAW", query)
+    return data[0].split() if res == "OK" and data and data[0] else []
+
+def trash_uids(mail, uids, query, trash_folder):
+    """Přesune zprávy do koše (musí být vybraná složka Všechny zprávy).
+    Vrací počet zpráv, které se do koše nedostaly."""
+    batch_store(mail, uids, "+X-GM-LABELS", "(\\Trash)")
+    mail.noop()
+    wanted = set(uids)
+    left = [u for u in search_raw(mail, query) if u in wanted]
+    if left and trash_folder:
+        print(f"   ℹ️ Přesun do koše nezabral u {len(left)} zpráv, zkouším záložní způsob.")
+        for part in chunks(left, 100):
+            try:
+                mail.uid("copy", b",".join(part).decode(), f'"{trash_folder}"')
+            except Exception as e:
+                print(f"Chyba při přesunu do koše: {e}")
+        mail.noop()
+        left = [u for u in search_raw(mail, query) if u in wanted]
+    return len(left)
 
 def imap_date(dt):
     return dt.strftime("%d-%b-%Y")
@@ -377,17 +451,17 @@ def clean_gmail():
     old_uids = data[0].split()[:MAX_ARCHIVE] if res == "OK" else []
     print(f"Starých přečtených k archivaci: {len(old_uids)}")
     if old_uids and not DRY_RUN:
-        failed = batch_store(mail, old_uids, "-X-GM-LABELS", "(\\Inbox)")
+        failed = archive_uids(mail, old_uids)
         failed_total += failed
         stats["expired"] += len(old_uids) - failed
 
     all_mail = find_all_mail(mail)
+    trash_folder = find_folder(mail, "\\Trash")
     if all_mail:
         mail.select(f'"{all_mail}"')
         for query, days in DELETE_RULES:
             q = f'"{query} older_than:{days}d -is:starred"'
-            res, data = mail.uid("search", None, "X-GM-RAW", q)
-            found = data[0].split()[:MAX_BATCH] if res == "OK" else []
+            found = search_raw(mail, q)[:MAX_BATCH]
             print(f"Mazání [{query}, starší než {days} dní]: {len(found)} zpráv")
             if DRY_RUN:
                 for uid in found[:20]:
@@ -395,7 +469,7 @@ def clean_gmail():
                     if msg is not None:
                         print(f"   🗑️ by šlo do koše: '{decode_subject(msg)}'")
             elif found:
-                failed = batch_store(mail, found, "+X-GM-LABELS", "(\\Trash)")
+                failed = trash_uids(mail, found, q, trash_folder)
                 failed_total += failed
                 stats["deleted"] = stats.get("deleted", 0) + len(found) - failed
     else:
@@ -408,9 +482,9 @@ def clean_gmail():
         return
 
     if failed_total:
-        print(f"⚠️ Gmail nepotvrdil {failed_total} změn.")
+        print(f"⚠️ Nepodařilo se provést {failed_total} změn (viz výše).")
     else:
-        print("✅ Gmail potvrdil všechny změny.")
+        print("✅ Všechny změny ověřeny.")
 
     save_stats(stats)
     print("Hotovo.")
