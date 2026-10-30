@@ -2,21 +2,26 @@ name: Gmail Cleanup Agent
 
 on:
   schedule:
-    - cron: '0 20 * * *' # Spustí se každý den ve 22:00 SEČ
-
-  workflow_dispatch: # Umožňuje ruční spuštění kdykoliv jedním kliknutím
+    - cron: '0 20 * * *' # každý den ve 20:00 UTC (21:00 v zimě, 22:00 v létě)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Jen zkouška (nic se nezmění ani nesmaže)'
+        type: boolean
+        default: true
 
 jobs:
   cleanup:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
@@ -25,12 +30,12 @@ jobs:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
-          DRY_RUN: "0"
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '1' || '0' }}
         run: |
           python cleanup_agent.py
 
       - name: Commit stats and report date update
-        uses: stefanzweifel/git-auto-commit-action@v4
+        uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "Auto: Update agent stats and report schedule"
           file_pattern: "last_report.txt stats.json"
