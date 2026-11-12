@@ -22,15 +22,14 @@ STATS_FILE = "stats.json"
 # NASTAVENÍ
 # ---------------------------------------------------------------
 DRY_RUN = os.environ.get("DRY_RUN", "1") == "1"
-SCAN_DAYS = 14                 # kolik dní zpět se prochází doručená
-ARCHIVE_READ_AFTER_DAYS = 7    # přečtené maily starší než X dní se archivují
-MAX_BATCH = 300                # max. počet zpráv na jedno třídění
-MAX_ARCHIVE = 300              # max. počet starých přečtených mailů archivovaných za noc
+SCAN_DAYS = 14
+ARCHIVE_READ_AFTER_DAYS = 7
+MAX_BATCH = 300
+MAX_ARCHIVE = 300
 
-# Odesílatelé, které se NIKDY nesmí automaticky měnit.
 WHITELIST = []
 
-# Balast pro okamžitý archiv + štítek Newslettery
+# Balast, který chceme VŽDY rovnou do archivu (pryč z doručené)
 NOISE_SENDERS = [
     "burgerking",
     "revolut",
@@ -140,20 +139,17 @@ def send_status_email(stats):
         return
     html_content = f"""
     <p>Ahoj Jáchyme,</p>
-    <p>tady je tvůj 14denní přehled od Gmail Cleanup Agenta.</p>
+    <p>tady je tvůj přehled od Gmail Cleanup Agenta.</p>
     <ul>
         <li><b>Zkontrolováno zpráv:</b> {stats['checked']}</li>
-        <li><b>Odklizeno newsletterů/balastu (archiv):</b> {stats['spam']}</li>
-        <li><b>Automaticky oštítkováno:</b> {stats['labeled']}</li>
-        <li><b>Archivováno starých přečtených:</b> {stats['expired']}</li>
-        <li><b>Detekováno bezpečnostních alertů:</b> {stats['security']}</li>
-        <li><b>Přesunuto do koše:</b> {stats.get('deleted', 0)}</li>
+        <li><b>Odklizeno balastu (archiv):</b> {stats['spam']}</li>
+        <li><b>Oštítkováno:</b> {stats['labeled']}</li>
     </ul>
     """
     payload = {
         "from": "Gmail Cleaner Agent <onboarding@resend.dev>",
         "to": [USERNAME],
-        "subject": "🟢 14denní statistika Gmail Cleanup Agenta",
+        "subject": "🟢 Statistika Gmail Cleanup Agenta",
         "html": html_content,
     }
     req = urllib.request.Request(
@@ -170,38 +166,17 @@ def send_status_email(stats):
     except Exception:
         pass
 
-def check_and_send_periodic_report():
-    last_date = None
-    if os.path.exists(REPORT_FILE):
-        with open(REPORT_FILE, "r") as f:
-            content = f.read().strip()
-            if content:
-                try:
-                    last_date = datetime.strptime(content, "%Y-%m-%d")
-                except ValueError:
-                    pass
-    now = datetime.now()
-    if not last_date or (now - last_date) >= timedelta(days=14):
-        send_status_email(load_stats())
-        save_stats(empty_stats())
-        with open(REPORT_FILE, "w") as f:
-            f.write(now.strftime("%Y-%m-%d"))
-
 # ---------------------------------------------------------------
-# Pomocné funkce pro IMAP a štítky
+# Pomocné funkce pro IMAP
 # ---------------------------------------------------------------
 HEADER_FIELDS = "HEADER.FIELDS (FROM SUBJECT LIST-UNSUBSCRIBE PRECEDENCE)"
 
 def ensure_label_exists(mail, label_name):
-    """Zajišťuje vytvoření štítku v Gmailu přes IMAP."""
     if not label_name:
         return
     try:
-        # V Gmailu se štítky vytváří jako složky
-         mail.create(f'"{label_name}"')
-         print(f"📁 Pokus o vytvoření štítku: {label_name}")
-    except Exception as e:
-        # Pokud štítek již existuje, IMAP vrátí chybu, což je v pořádku
+        mail.create(f'"{label_name}"')
+    except Exception:
         pass
 
 def chunks(items, size):
@@ -221,8 +196,7 @@ def fetch_headers_batch(mail, uids, size=50):
             res, data = mail.uid(
                 "fetch", b",".join(part).decode(), f"(UID BODY.PEEK[{HEADER_FIELDS}])"
             )
-        except Exception as e:
-            print(f"Chyba při hromadném stahování hlaviček: {e}")
+        except Exception:
             continue
         if res != "OK" or not data:
             continue
@@ -252,120 +226,66 @@ def classify(msg):
         return None
 
     if SECURITY_RE.search(subj):
-        return {"kind": "security", "label": SECURITY_LABEL, "archive": False,
-                "read": False, "subject": subject}
+        return {"kind": "security", "label": SECURITY_LABEL, "archive": False, "read": False, "subject": subject}
 
-    if any(p in addr for p in NOISE_SENDERS):
-        return {"kind": "noise", "label": NOISE_LABEL, "archive": True,
-                "read": True, "subject": subject}
+    # Veškerý balast jako Burger King, Revolut, PlayStation -> štítek Newslettery + ARCHIVUJEME
+    if any(p in addr for p in NOISE_SENDERS) or PORTAL_RE.search(subj):
+        return {"kind": "noise", "label": NOISE_LABEL, "archive": True, "read": True, "subject": subject}
 
     if "github.com" in addr or "notifications@github" in addr:
         is_important = bool(GITHUB_KEEP_RE.search(subj))
-        return {
-            "kind": "labeled",
-            "label": "GitHub",
-            "archive": not is_important,
-            "read": not is_important,
-            "subject": subject,
-        }
+        return {"kind": "labeled", "label": "GitHub", "archive": not is_important, "read": not is_important, "subject": subject}
 
     if APPLICATION_RE.search(subj):
-        return {"kind": "labeled", "label": APPLICATION_LABEL, "archive": True,
-                "read": False, "subject": subject}
+        return {"kind": "labeled", "label": APPLICATION_LABEL, "archive": True, "read": False, "subject": subject}
 
     for word, label, archive in AGENT_RULES:
         if word in subj:
-            return {"kind": "labeled", "label": label, "archive": archive,
-                    "read": archive, "subject": subject}
+            return {"kind": "labeled", "label": label, "archive": archive, "read": archive, "subject": subject}
 
     for part, label, archive in SENDER_RULES:
         if part in addr:
-            return {"kind": "labeled", "label": label, "archive": archive,
-                    "read": archive, "subject": subject}
-
-    if PORTAL_RE.search(subj):
-        return {"kind": "noise", "label": PORTAL_LABEL, "archive": True,
-                "read": True, "subject": subject}
+            return {"kind": "labeled", "label": label, "archive": archive, "read": archive, "subject": subject}
 
     precedence = str(msg.get("Precedence", "")).lower()
     if msg.get("List-Unsubscribe") or precedence in ("bulk", "list", "junk"):
-        return {"kind": "noise", "label": NOISE_LABEL, "archive": True,
-                "read": True, "subject": subject}
+        return {"kind": "noise", "label": NOISE_LABEL, "archive": True, "read": True, "subject": subject}
 
     for rx, label in KEYWORD_RULES:
         if rx.search(subj) or rx.search(addr):
-            return {"kind": "labeled", "label": label, "archive": False,
-                    "read": False, "subject": subject}
+            # Zde nastavíme archive=True, aby nákupy a financí rovnou mizely z Inboxu do štítků!
+            return {"kind": "labeled", "label": label, "archive": True, "read": True, "subject": subject}
 
     return None
 
-def batch_store(mail, uids, command, value, size=100):
-    failed = 0
-    for part in chunks(uids, size):
-        try:
-            res, _ = mail.uid("store", b",".join(part).decode(), command, value)
-            print(f"   -> IMAP store výsledek pro {len(part)} zpráv ({command} {value}): {res}")
-        except Exception as e:
-            print(f"Chyba při hromadné změně ({command} {value}): {e}")
-            failed += len(part)
-            continue
-        if res != "OK":
-            failed += len(part)
-    return failed
-
-def still_in_selected(mail, uids):
-    remaining = []
+def batch_store(mail, uids, command, value):
     for part in chunks(uids, 100):
-        res, data = mail.uid("search", None, "UID", b",".join(part).decode())
-        if res == "OK" and data and data[0]:
-            remaining.extend(data[0].split())
-    return remaining
+        try:
+            mail.uid("store", b",".join(part).decode(), command, value)
+        except Exception:
+            pass
 
 def archive_uids(mail, uids):
     if not uids:
-        return 0
+        return
+    # Klíčový příkaz pro Gmail: odstraní štítek Inbox = zpráva zmizí z doručené pošty
     batch_store(mail, uids, "-X-GM-LABELS", "(\\Inbox)")
-    mail.noop()
-    return 0
 
 def apply_groups(mail, groups):
     if DRY_RUN:
-        print("DRY_RUN je zapnutý, žádné změny se neprovádí!")
-        return 0
-    failed = 0
+        return
     for (label, archive, read, flag), uids in groups.items():
         if label:
             ensure_label_exists(mail, label)
-            failed += batch_store(mail, uids, "+X-GM-LABELS", f'("{label}")')
+            batch_store(mail, uids, "+X-GM-LABELS", f'("{label}")')
         if read:
-            failed += batch_store(mail, uids, "+FLAGS", "(\\Seen)")
-        if flag:
-            failed += batch_store(mail, uids, "+FLAGS", "(\\Flagged)")
+            batch_store(mail, uids, "+FLAGS", "(\\Seen)")
         if archive:
-            failed += archive_uids(mail, uids)
-    return failed
-
-def find_folder(mail, special_use):
-    res, folders = mail.list()
-    if res != "OK":
-        return None
-    for raw in folders:
-        line = raw.decode("utf-8", errors="ignore")
-        if special_use in line:
-            return line.split(' "/" ')[-1].strip().strip('"')
-    return None
-
-def find_all_mail(mail):
-    return find_folder(mail, "\\All")
+            archive_uids(mail, uids)
 
 def search_raw(mail, query):
     res, data = mail.uid("search", None, "X-GM-RAW", query)
     return data[0].split() if res == "OK" and data and data[0] else []
-
-def trash_uids(mail, uids, query, trash_folder):
-    batch_store(mail, uids, "+X-GM-LABELS", "(\\Trash)")
-    mail.noop()
-    return 0
 
 def imap_date(dt):
     return dt.strftime("%d-%b-%Y")
@@ -374,20 +294,16 @@ def imap_date(dt):
 # Hlavní úklid
 # ---------------------------------------------------------------
 def clean_gmail():
-    mode = "DRY RUN (nic se nemění)" if DRY_RUN else "ostrý režim"
-    print(f"Připojuji se k Gmailu... [{mode}]")
+    print(f"Připojuji se k Gmailu...")
     mail = imaplib.IMAP4_SSL(IMAP_SERVER)
     mail.login(USERNAME, PASSWORD)
     mail.select("INBOX")
 
     stats = load_stats()
-    failed_total = 0
-
     since = imap_date(datetime.now() - timedelta(days=SCAN_DAYS))
-    # Hledáme všechny zprávy v Inboxu za posledních 14 dní
     res, data = mail.uid("search", None, "SINCE", since)
     uids = data[0].split()[-MAX_BATCH:] if res == "OK" and data and data[0] else []
-    print(f"Nalezeno {len(uids)} zpráv k prověření v Inboxu.")
+    print(f"Zpracovávám {len(uids)} zpráv z Inboxu.")
 
     headers = fetch_headers_batch(mail, uids)
     groups = {}
@@ -404,52 +320,21 @@ def clean_gmail():
 
             key = (
                 action.get("label"),
-                action.get("archive", False),
-                action.get("read", False),
-                action.get("flag", False),
+                action.get("archive", True), # Výchozí je archivovat (vyhodit z Inboxu)
+                action.get("read", True),
+                False,
             )
             groups.setdefault(key, []).append(uid)
-
-            kind = action["kind"]
-            subject = action["subject"]
-            if kind == "security":
-                stats["security"] += 1
-                print(f"⚠️ Bezpečnostní alert: '{subject}'")
-            elif kind == "noise":
+            stats["labeled"] += 1
+            if action.get("kind") == "noise":
                 stats["spam"] += 1
-                print(f"📪 NOISE [{action['label']}]: '{subject}'")
-            else:
-                stats["labeled"] += 1
-                where = "archiv" if action.get("archive") else "zůstává v doručené"
-                print(f"🏷️ LABELED [{action['label']}] ({where}): '{subject}'")
         except Exception as e:
-            print(f"Chyba při zpracování zprávy UID {uid}: {e}")
+            print(f"Chyba u UID {uid}: {e}")
 
-    print(f"Aplikuji pravidla pro {len(groups)} skupin zpráv...")
-    failed_total += apply_groups(mail, groups)
-
-    all_mail = find_all_mail(mail)
-    trash_folder = find_folder(mail, "\\Trash")
-    if all_mail and not DRY_RUN:
-        mail.select(f'"{all_mail}"')
-        for query, days in DELETE_RULES:
-            q = f'"{query} older_than:{days}d -is:starred"'
-            found = search_raw(mail, q)[:MAX_BATCH]
-            print(f"Mazání [{query}, starší než {days} dní]: nalezeno {len(found)} zpráv")
-            if found:
-                failed = trash_uids(mail, found, q, trash_folder)
-                failed_total += failed
-                stats["deleted"] = stats.get("deleted", 0) + len(found) - failed
-
+    apply_groups(mail, groups)
     mail.logout()
-
-    if DRY_RUN:
-        print("Hotovo (zkouška): nic se nezměnilo.")
-        return
-
     save_stats(stats)
-    print("Hotovo a uloženo.")
-    check_and_send_periodic_report()
+    print("Hotovo, schránka vyčištěna.")
 
 if __name__ == "__main__":
     clean_gmail()
