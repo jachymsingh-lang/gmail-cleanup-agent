@@ -364,7 +364,6 @@ def clean_gmail():
 
     apply_groups(mail, groups)
 
-    # Mazání starých zpráv do koše
     all_mail = find_all_mail(mail)
     trash_folder = find_folder(mail, "\\Trash")
     if all_mail:
