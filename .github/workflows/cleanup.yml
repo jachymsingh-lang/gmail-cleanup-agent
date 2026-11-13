@@ -2,40 +2,45 @@ name: Gmail Cleanup Agent
 
 on:
   schedule:
-    - cron: '0 20 * * *'
+    # Denně v 18:00 UTC (19:00 / 20:00 českého času podle letního času)
+    - cron: "0 18 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Jen zkouška (nic se nezmění ani nesmaže)'
+        description: "Dry run (jen vypsat, co by se stalo - nic nearchivovat ani nemazat)"
+        type: boolean
+        default: true
+      force_report:
+        description: "Poslat report přes Resend i mimo 14denní cyklus"
         type: boolean
         default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gmail-cleanup
+  cancel-in-progress: false
 
 jobs:
   cleanup:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
+    timeout-minutes: 15
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: "3.12"
 
-      - name: Run Cleanup Script
+      - name: Run Gmail Cleanup Agent
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
-          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '1' || '0' }}
-        run: |
-          python cleanup_agent.py
-
-      - name: Commit stats and report date update
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "Auto: Update agent stats and report schedule"
-          file_pattern: "last_report.txt stats.json"
+          REPORT_EMAIL: ${{ secrets.REPORT_EMAIL }}
+          DRY_RUN: ${{ inputs.dry_run || false }}
+          FORCE_REPORT: ${{ inputs.force_report || false }}
+        run: python cleanup_agent.py
