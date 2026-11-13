@@ -79,7 +79,7 @@ RULES = [
 
 # Předměty, které se u obecných pravidel (noreply/newsletter/značky) NEarchivují.
 PROTECT_RE = re.compile(
-    r"ověřovac|overovac|verification|one[- ]time|\botp\b|security code|bezpečnost"
+    r"ověřovac|overovac|verification|one[- ]time|\botp\b|security code|\byour\b.{0,30}\bcode\b|bezpečnost"
     r"|heslo|password|přihlášení|sign[- ]in|faktur|invoice|platb|payment|receipt"
     r"|účtenk|objednáv|\border\b|zásilk|delivery|potvrzení",
     re.IGNORECASE,
@@ -166,6 +166,11 @@ def quote(name):
     """Název složky/štítku pro IMAP příkaz."""
     enc = imap_utf7_encode(name).replace("\\", "\\\\").replace('"', '\\"')
     return f'"{enc}"'
+
+
+def quote_raw(raw):
+    """Název složky tak, jak ho vrátil LIST (už je v IMAP UTF-7) - nekódovat podruhé!"""
+    return '"' + raw.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def decode_hdr(value):
@@ -272,7 +277,7 @@ def search_uids(imap, *criteria):
 def fetch_headers(imap, uids):
     """Vrátí list dictů: uid, flags, addr, display, subject, bulk."""
     result = []
-    fields = "(FLAGS BODY.PEEK[HEADER.FIELDS (FROM SUBJECT LIST-UNSUBSCRIBE PRECEDENCE)])"
+    fields = "(FLAGS X-GM-MSGID BODY.PEEK[HEADER.FIELDS (FROM SUBJECT LIST-UNSUBSCRIBE PRECEDENCE)])"
     for batch in chunks(uids, BATCH):
         typ, data = imap.uid("FETCH", b",".join(batch).decode(), fields)
         if typ != "OK":
@@ -288,12 +293,14 @@ def fetch_headers(imap, uids):
                 info = item[0].decode("utf-8", "replace") + " " + trailer
                 m_uid = re.search(r"UID (\d+)", info)
                 m_fl = re.search(r"FLAGS \(([^)]*)\)", info)
+                m_id = re.search(r"X-GM-MSGID (\d+)", info)
                 if m_uid:
                     msg = email.message_from_bytes(item[1])
                     display, addr = parseaddr(str(msg.get("From", "")))
                     precedence = str(msg.get("Precedence", "")).lower()
                     result.append({
                         "uid": m_uid.group(1),
+                        "msgid": m_id.group(1) if m_id else None,
                         "flags": (m_fl.group(1) if m_fl else ""),
                         "addr": addr.lower(),
                         "display": decode_hdr(display),
@@ -340,52 +347,67 @@ def classify(m):
 # Akce
 # ---------------------------------------------------------------------------
 
-def archive_and_label(imap, plan, existing):
-    """plan: {label: [msg, ...]} -> vrátí množinu skutečně archivovaných UID."""
-    archived = set()
+def archive_and_label(imap, plan, existing, all_mail_raw):
+    """Štítkuje a archivuje přes složku Všechny zprávy (tam X-GM-LABELS funguje spolehlivě).
+
+    UID v INBOXu a ve Všech zprávách se liší, proto se mapuje přes X-GM-MSGID.
+    Vrátí množinu UID (ve Všech zprávách) skutečně zpracovaných mailů.
+    """
     for label, items in plan.items():
         log(f"\nŠtítek '{label}': {len(items)} mailů")
         for m in items:
             log(f"  - {m['addr']} | {m['subject'][:70]}")
-        if DRY_RUN:
-            ensure_label(imap, label, existing)
-            continue
-        if not ensure_label(imap, label, existing):
-            continue
-        uids = [m["uid"] for m in items]
+        ensure_label(imap, label, existing)
+    if DRY_RUN:
+        return set()
+
+    typ, _ = imap.select(quote_raw(all_mail_raw))
+    if typ != "OK":
+        log(f"! Nelze otevřít Všechny zprávy ({all_mail_raw}) - archivace přeskočena")
+        return set()
+
+    done = set()
+    for label, items in plan.items():
+        uids = []
+        for m in items:
+            if not m.get("msgid"):
+                log(f"  ! chybí X-GM-MSGID: {m['subject'][:50]}")
+                continue
+            found = search_uids(imap, "X-GM-MSGID", m["msgid"])
+            if found:
+                uids.append(found[0].decode())
         for chunk in chunks(uids, 200):
             uidset = ",".join(chunk)
             typ, data = imap.uid("STORE", uidset, "+X-GM-LABELS", f"({quote(label)})")
             if typ != "OK":
-                log(f"  ! přidání štítku selhalo: {data}")
+                log(f"  ! přidání štítku '{label}' selhalo: {data}")
                 continue
             typ, data = imap.uid("STORE", uidset, "-X-GM-LABELS", "(\\Inbox)")
             if typ != "OK":
                 log(f"  ! odebrání z Inboxu selhalo: {data}")
                 continue
-            archived.update(chunk)
-    return archived
+            done.update(chunk)
+    return done
 
 
-def verify_archived(imap, since, archived):
-    """Znovu projde INBOX a ověří, že archivované maily už v něm nejsou."""
-    if not archived:
+def verify_archived(imap, all_mail_raw, done):
+    """Ověří skutečný stav v Gmailu: zpracované maily nesmí mít štítek Inbox."""
+    if not done:
         return
-    imap.noop()
-    typ, _ = imap.select("INBOX")
+    typ, _ = imap.select(quote_raw(all_mail_raw), readonly=True)
     if typ != "OK":
         return
-    still = {u.decode() for u in search_uids(imap, "SINCE", imap_date(since))}
-    leftover = still & archived
+    in_inbox = {u.decode() for u in search_uids(imap, "X-GM-RAW", '"in:inbox"')}
+    leftover = in_inbox & done
     if leftover:
-        log(f"\n! Varování: {len(leftover)} mailů zůstalo v Inboxu i po archivaci.")
+        log(f"\n! Varování: {len(leftover)} z {len(done)} mailů má stále štítek Inbox.")
     else:
-        log(f"\nOvěřeno: {len(archived)} mailů už v Inboxu není.")
+        log(f"\nOvěřeno: všech {len(done)} zpracovaných mailů už není v Inboxu.")
 
 
 def trash_old(imap, all_mail_raw):
     """Pošle do koše maily podle TRASH_RULES. Vrátí počet."""
-    typ, _ = imap.select(quote(all_mail_raw), readonly=DRY_RUN)
+    typ, _ = imap.select(quote_raw(all_mail_raw), readonly=DRY_RUN)
     if typ != "OK":
         log(f"! Nelze otevřít složku Všechny zprávy ({all_mail_raw})")
         return 0
@@ -423,7 +445,9 @@ def count_query(imap, query):
 
 
 def build_report(imap, all_mail_raw, run_stats):
-    imap.select(quote(all_mail_raw), readonly=True)
+    typ, _ = imap.select(quote_raw(all_mail_raw), readonly=True)
+    if typ != "OK":
+        raise RuntimeError(f"Nelze otevřít {all_mail_raw}")
     rows = []
     for label in REPORT_LABELS:
         n = count_query(imap, f"label:{label_query_name(label)} newer_than:14d")
@@ -512,9 +536,9 @@ def main():
                 skipped += 1
 
         log(f"K archivaci: {sum(len(v) for v in plan.values())} | ponecháno v Inboxu: {skipped}")
-        archived = archive_and_label(imap, plan, existing)
+        archived = archive_and_label(imap, plan, existing, all_mail_raw)
         run_stats["archived"] = len(archived)
-        verify_archived(imap, since, archived)
+        verify_archived(imap, all_mail_raw, archived)
 
         # 2) Staré věci do koše
         run_stats["trashed"] = trash_old(imap, all_mail_raw)
@@ -524,8 +548,11 @@ def main():
             if DRY_RUN:
                 log("\n[dry-run] report by se odeslal, ale dry run ho nepošle.")
             else:
-                html = build_report(imap, all_mail_raw, run_stats)
-                send_resend("Gmail Cleanup Agent - 14denní report", html)
+                try:
+                    html = build_report(imap, all_mail_raw, run_stats)
+                    send_resend("Gmail Cleanup Agent - 14denní report", html)
+                except Exception as e:  # report nesmí shodit celý běh
+                    log(f"! Report se nepodařilo vytvořit: {e}")
 
         summary = (f"Archivováno: {run_stats['archived']} | "
                    f"Do koše: {run_stats['trashed']} | DRY_RUN={DRY_RUN}")
