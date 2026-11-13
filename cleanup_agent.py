@@ -3,10 +3,10 @@
  
 - připojí se přes IMAP (imap.gmail.com) pomocí app passwordu
 - projde INBOX za posledních LOOKBACK_DAYS dní (výchozí 14)
-- detekuje balast, faktury (Foodora, Google Play), banky (přejmenováno z Financee na Banky) a vlastní maily
+- detekuje faktury (Bolt, Rohlik, Foodora, Google Play) -> štítek Faktury
+- detekuje přihlášení a notifikace -> štítek Notifikace / Balast
 - vytvoří chybějící štítky, oštítkuje a FYZICKY odebere z doručené pošty (-X-GM-LABELS (\\Inbox))
 - staré věci posílá do koše (podle pravidel TRASH_RULES)
-- každých 14 dní pošle hezký HTML report přes Resend API
 """
  
 import base64
@@ -41,7 +41,7 @@ LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS", "14") or "14")
 MAX_TRASH_PER_RUN = 300
 BATCH = 100
  
-OWN_LABEL = "OdMne"  # Štítek pro maily odeslané tebou
+OWN_LABEL = "OdMne"
  
 def norm_addr(a):
     a = (a or "").strip().lower()
@@ -65,14 +65,21 @@ RULES = [
      "from": [],
      "subject": ["výběrové řízení", "výběrového řízení", "výběrovém řízení", "vyberoveho rizeni", "thank you for applying",
                  "vaše přihláška", "vase prihlaska", "děkujeme za váš zájem"]},
-    # --- Faktury a účtenky (Foodora, Google Play atd.) ---
-    {"name": "Faktury Foodora", "label": "Faktury", "force": True,
-     "from": ["foodora"], "subject": []},
-    {"name": "Faktury Google Play", "label": "Faktury", "force": True,
-     "from": ["google play"], "subject": ["potvrzení objednávky", "faktura", "předplatné"]},
-    # --- Banky (přejmenováno z Financee) ---
+    
+    # --- FAKTURY A ÚČTENKY (Bolt, Rohlik, Foodora, Google Play apod.) ---
+    {"name": "Faktury a objednávki", "label": "Faktury", "force": True,
+     "from": ["bolt", "rohlik", "foodora", "google play"],
+     "subject": ["faktura", "invoice", "účtenka", "uctenka", "objednávk", "objednavk", "vyúčtování", "vyucitovani", "jízda", "jizda"]},
+
+    # --- PŘIHLÁŠENÍ A NOTIFIKACE (Bolt, Rohlik a další služby) ---
+    {"name": "Služby Notifikace / Přihlášení", "label": "Notifikace", "force": True,
+     "from": ["bolt", "rohlik", "foodora"],
+     "subject": ["přihlášení", "prihlaseni", "registrace", "zaznamenali jsme", "nové zařízení", "nove zarizeni", "ověření", "overeni"]},
+
+    # --- Banky ---
     {"name": "Banky mBank / KB", "label": "Banky", "force": True,
      "from": ["mbank", "komerční banka", "kb.cz", "csob", "airbank", "fio"], "subject": []},
+    
     # --- Balast ---
     {"name": "Burger King", "label": "Balast",
      "from": ["burgerking", "burger king"], "subject": []},
@@ -212,7 +219,6 @@ def existing_labels(folders):
             if not decoded.startswith("[Gmail]") and decoded.upper() != "INBOX"}
  
 def rename_old_labels(imap, folders):
-    """Automaticky přejmenuje starý štítek Financee na Banky, pokud existuje."""
     for _flags, raw_name, decoded_name in folders:
         if decoded_name.lower() == "financee":
             if not DRY_RUN:
@@ -286,7 +292,6 @@ def classify(m):
     if any(s in subj for s in SKIP_SUBJECTS):
         return None, "skip"
     
-    # Detekce mailů odeslaných tebou
     if norm_addr(m["addr"]) in OWN_ADDRESSES:
         return OWN_LABEL, "odesláno mnou"
 
@@ -459,8 +464,8 @@ def main():
     run_stats = {"archived": 0, "trashed": 0}
     try:
         folders = list_folders(imap)
-        rename_old_labels(imap, folders) # Přejmenuje Financee na Banky
-        folders = list_folders(imap)     # Aktualizuje seznam po přejmenování
+        rename_old_labels(imap, folders)
+        folders = list_folders(imap)
         all_mail_raw = special_folder(folders, "\\All", "[Gmail]/All Mail")
         existing = existing_labels(folders)
  
