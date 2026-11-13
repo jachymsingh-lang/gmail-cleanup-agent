@@ -3,12 +3,10 @@
  
 - připojí se přes IMAP (imap.gmail.com) pomocí app passwordu
 - projde INBOX za posledních LOOKBACK_DAYS dní (výchozí 14)
-- detekuje balast a vlastní maily, vytvoří chybějící štítky,
-  oštítkuje a FYZICKY odebere z doručené pošty (-X-GM-LABELS (\\Inbox))
+- detekuje balast, faktury (Foodora, Google Play), banky (přejmenováno z Financee na Banky) a vlastní maily
+- vytvoří chybějící štítky, oštítkuje a FYZICKY odebere z doručené pošty (-X-GM-LABELS (\\Inbox))
 - staré věci posílá do koše (podle pravidel TRASH_RULES)
 - každých 14 dní pošle hezký HTML report přes Resend API
- 
-Pouze standardní knihovna, žádné pip install.
 """
  
 import base64
@@ -67,6 +65,15 @@ RULES = [
      "from": [],
      "subject": ["výběrové řízení", "výběrového řízení", "výběrovém řízení", "vyberoveho rizeni", "thank you for applying",
                  "vaše přihláška", "vase prihlaska", "děkujeme za váš zájem"]},
+    # --- Faktury a účtenky (Foodora, Google Play atd.) ---
+    {"name": "Faktury Foodora", "label": "Faktury", "force": True,
+     "from": ["foodora"], "subject": []},
+    {"name": "Faktury Google Play", "label": "Faktury", "force": True,
+     "from": ["google play"], "subject": ["potvrzení objednávky", "faktura", "předplatné"]},
+    # --- Banky (přejmenováno z Financee) ---
+    {"name": "Banky mBank / KB", "label": "Banky", "force": True,
+     "from": ["mbank", "komerční banka", "kb.cz", "csob", "airbank", "fio"], "subject": []},
+    # --- Balast ---
     {"name": "Burger King", "label": "Balast",
      "from": ["burgerking", "burger king"], "subject": []},
     {"name": "PlayStation", "label": "Balast",
@@ -80,8 +87,7 @@ RULES = [
  
 PROTECT_RE = re.compile(
     r"ověřovac|overovac|verification|one[- ]time|\botp\b|security code|\byour\b.{0,30}\bcode\b|bezpečnost"
-    r"|heslo|password|přihlášení|sign[- ]in|faktur|invoice|platb|payment|receipt"
-    r"|účtenk|objednáv|\border\b|zásilk|delivery|potvrzení",
+    r"|heslo|password|přihlášení|sign[- ]in",
     re.IGNORECASE,
 )
  
@@ -95,9 +101,10 @@ TRASH_RULES = [
     ("Google alerty starší 7 dní", "from:no-reply@accounts.google.com older_than:7d -is:starred"),
     ("Odpovědi na inzeráty starší 60 dní", "label:OdpovedNaInzeraty older_than:60d -is:starred"),
     ("Vlastní maily starší 30 dní", "label:OdMne older_than:30d -is:starred"),
+    ("Faktury starší 90 dní", "label:Faktury older_than:90d -is:starred"),
 ]
  
-REPORT_LABELS = ["OdMne", "Balast", "Newslettery", "Notifikace", "NHL agent", "JobAgent", "OdpovedNaInzeraty"]
+REPORT_LABELS = ["OdMne", "Faktury", "Banky", "Balast", "Newslettery", "Notifikace", "NHL agent", "JobAgent", "OdpovedNaInzeraty"]
 MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
  
 def log(msg):
@@ -204,6 +211,18 @@ def existing_labels(folders):
     return {decoded.lower() for _f, _r, decoded in folders
             if not decoded.startswith("[Gmail]") and decoded.upper() != "INBOX"}
  
+def rename_old_labels(imap, folders):
+    """Automaticky přejmenuje starý štítek Financee na Banky, pokud existuje."""
+    for _flags, raw_name, decoded_name in folders:
+        if decoded_name.lower() == "financee":
+            if not DRY_RUN:
+                try:
+                    imap.rename(quote_raw(raw_name), quote("Banky"))
+                    log("  + Přejmenován štítek 'Financee' na 'Banky'")
+                except Exception as e:
+                    log(f"  ! Nelze přejmenovat štítek Financee: {e}")
+            break
+
 def ensure_label(imap, label, existing):
     if label.lower() in existing:
         return True
@@ -440,6 +459,8 @@ def main():
     run_stats = {"archived": 0, "trashed": 0}
     try:
         folders = list_folders(imap)
+        rename_old_labels(imap, folders) # Přejmenuje Financee na Banky
+        folders = list_folders(imap)     # Aktualizuje seznam po přejmenování
         all_mail_raw = special_folder(folders, "\\All", "[Gmail]/All Mail")
         existing = existing_labels(folders)
  
